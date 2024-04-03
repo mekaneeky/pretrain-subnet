@@ -152,7 +152,7 @@ def compute_losses(
         pad_token_id int: Pad token id for the tokenizer used to tokenize the batches.
 
     Returns:
-        dict: A dictionary with page indices as keys and lists of loss values as values.
+        list: A list of losses for each batch.
     """
     model.to(device)
     model.eval()
