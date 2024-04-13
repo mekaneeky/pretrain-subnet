@@ -105,6 +105,11 @@ def get_config():
         help="If provided, loads a previously trained HF model from the specified directory",
     )
     parser.add_argument(
+        "--upload_b16",
+        action="store_true",  # Currently defaults to false. Flip post 7b block.
+        help="If true, upload the model using bfloat16.",
+    )
+    parser.add_argument(
         "--load_model",
         type=str,
         default=None,
@@ -167,7 +172,11 @@ async def load_starting_model(
         # Get the best UID be incentive and load it.
         best_uid = pt.graph.best_uid(metagraph)
         model = await pt.mining.load_remote_model(
-            best_uid, config.model_dir, metagraph, metadata_store, remote_model_store
+            best_uid,
+            config.model_dir,
+            metagraph,
+            metadata_store,
+            remote_model_store,
         )
         bt.logging.success(
             f"Training with model from best uid: {best_uid}. Model={str(model)}"
@@ -371,8 +380,10 @@ async def main(config: bt.config):
                     f"Trained model had a best_avg_loss of {best_avg_loss} which is below the threshold of {config.avg_loss_upload_threshold}. Uploading to hugging face. "
                 )
 
-                # First, reload the best model from the training run.
-                model_to_upload = pt.mining.load_local_model(model_dir)
+                # First, reload the best model from the training run, using b16 if passed.
+                model_to_upload = pt.mining.load_local_model(
+                    model_dir, config.upload_b16
+                )
                 await pt.mining.push(
                     model_to_upload,
                     config.hf_repo_id,

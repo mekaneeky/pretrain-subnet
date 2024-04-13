@@ -184,7 +184,7 @@ class Validator:
         self.global_step = 0
         self.last_epoch = self.metagraph.block.item()
 
-        self.uids_to_eval = []
+        self.uids_to_eval = set()
 
         # Create a set of newly added uids that should be evaluated on the next loop.
         self.pending_uids_to_eval_lock = threading.RLock()
@@ -508,9 +508,7 @@ class Validator:
                 # Find all hotkeys that are currently being evaluated or pending eval.
                 uids_to_keep = set()
                 with self.pending_uids_to_eval_lock:
-                    uids_to_keep = set(self.uids_to_eval).union(
-                        self.pending_uids_to_eval
-                    )
+                    uids_to_keep = self.uids_to_eval.union(self.pending_uids_to_eval)
 
                 hotkeys_to_keep = set()
                 with self.metagraph_lock:

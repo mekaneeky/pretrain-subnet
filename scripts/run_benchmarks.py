@@ -10,7 +10,7 @@ import wandb
 import torch
 import random
 from tqdm import tqdm
-from model.data import ModelId, ModelMetadata, TokenizerIdentifier
+from model.data import ModelMetadata, TokenizerIdentifier
 from model.storage.chain.chain_model_metadata_store import ChainModelMetadataStore
 from model.storage.hugging_face.hugging_face_model_store import HuggingFaceModelStore
 import pretrain as pt
@@ -26,8 +26,6 @@ import bittensor as bt
 import constants
 import model.utils as model_utils
 
-from pretrain.graph import best_uid
-
 load_dotenv()  # take environment variables from .env.
 
 PROJECT = "pretraining-leaderboard-data"
@@ -40,25 +38,15 @@ def compute_ppl(
     model: AutoModelForCausalLM,
     tokenizer: AutoTokenizer,
     stride: int = 512,
-    max_length: int = 1024,
-    device=None,
+    max_length: int = 2048,
 ) -> float:
     """Returns the perplexity of the model on the given text."""
-
-    if device is not None:
-        assert device in ["gpu", "cpu", "cuda"], "device should be either gpu or cpu."
-        if device == "gpu":
-            device = "cuda"
-    else:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    model = model.to(device)
 
     encodings = tokenizer(
         text,
         truncation=False,
         return_tensors="pt",
-    ).to(device)
+    ).to("cuda")
 
     loss_fct = CrossEntropyLoss(reduction="none", ignore_index=-100)
     seq_len = encodings.input_ids.size(1)
@@ -74,7 +62,7 @@ def compute_ppl(
                 f"Skipping batch as it has less than max_length tokens: {begin_loc}:{end_loc}."
             )
             break
-        input_ids = encodings.input_ids[:, begin_loc:end_loc].to(device)
+        input_ids = encodings.input_ids[:, begin_loc:end_loc].to("cuda")
         # attn_mask = encodings.attention_mask[:, begin_loc:end_loc].to(device)
         labels = input_ids.clone()
         # Ignore the tokens we've processed on a previous batch. -100 is a magic
@@ -106,21 +94,45 @@ class ModelProvider(abc.ABC):
     def get_tokenizer(self) -> AutoTokenizer:
         pass
 
+    @abc.abstractmethod
+    def get_sequence_length(self) -> int:
+        pass
+
 
 class HuggingFaceModelProvider(ModelProvider):
     """Provides a well-known model from hugging face."""
 
-    def __init__(self, model_name: str, cache_dir: str):
+    def __init__(
+        self,
+        model_name: str,
+        cache_dir: str,
+        sequence_length: int = 2048,
+        use_flash=True,
+    ):
         self.model_name = model_name
         self.cache_dir = cache_dir
+        self.sequence_length = sequence_length
+        self.use_flash = use_flash
 
     def get_model(self) -> AutoModelForCausalLM:
+        if self.use_flash:
+            return AutoModelForCausalLM.from_pretrained(
+                self.model_name,
+                cache_dir=self.cache_dir,
+                torch_dtype=torch.bfloat16,
+                attn_implementation="flash_attention_2",
+            )
         return AutoModelForCausalLM.from_pretrained(
-            self.model_name, cache_dir=self.cache_dir
+            self.model_name,
+            cache_dir=self.cache_dir,
+            torch_dtype=torch.bfloat16,
         )
 
     def get_tokenizer(self) -> AutoTokenizer:
         return AutoTokenizer.from_pretrained(self.model_name, cache_dir=self.cache_dir)
+
+    def get_sequence_length(self) -> int:
+        return self.sequence_length
 
 
 class SubnetModelProvider(ModelProvider):
@@ -149,15 +161,20 @@ class SubnetModelProvider(ModelProvider):
             return pt.model.get_old_tokenizer(cache_dir=self.cache_dir)
         return pt.model.get_tokenizer(cache_dir=self.cache_dir)
 
+    def get_sequence_length(self) -> int:
+        return model_utils.get_model_criteria(self.model_metadata.block).sequence_length
 
-def get_best_model_provider(cache_dir: str) -> Tuple[str, SubnetModelProvider]:
+
+def get_best_model_provider(
+    cache_dir: str, config: bt.config
+) -> Tuple[str, SubnetModelProvider]:
     """Returns a provider to fetch the subnets best model.
 
     Returns:
         Tuple[str, SubnetModelProvider]: A tuple containing the models' HF repo and the model provider.
     """
-    metagraph = bt.metagraph(netuid=constants.SUBNET_UID)
-    subtensor = bt.subtensor("finney")
+    subtensor = bt.subtensor(config=config)
+    metagraph = subtensor.metagraph(netuid=constants.SUBNET_UID)
     best_uid = pt.graph.best_uid(metagraph=metagraph)
     hotkey = metagraph.hotkeys[best_uid]
 
@@ -259,31 +276,62 @@ def format_model_size(size: int) -> str:
     return str(size)
 
 
-def run_benchmarks(args: ArgumentParser, datasets: Dict[str, str]):
+def run_benchmarks(args: ArgumentParser, datasets: Dict[str, str], config: bt.config):
     """Performs a single run of the benchmarks on the given datasets."""
-    best_model_hf, best_model_provider = get_best_model_provider(args.cache_dir)
+    best_model_hf, best_model_provider = get_best_model_provider(args.cache_dir, config)
     models = {
         best_model_hf: best_model_provider,
-        "gpt2": HuggingFaceModelProvider("gpt2", args.cache_dir),
-        "gpt2-large": HuggingFaceModelProvider("gpt2-large", args.cache_dir),
+        "gpt2": HuggingFaceModelProvider(
+            "gpt2", args.cache_dir, sequence_length=1024, use_flash=False
+        ),
+        "gpt2-large": HuggingFaceModelProvider(
+            "gpt2-large", args.cache_dir, sequence_length=1024, use_flash=False
+        ),
+        # # Also run a 3b for comparison.
+        "phi-2": HuggingFaceModelProvider("microsoft/phi-2", args.cache_dir),
+        "falcon-7b": HuggingFaceModelProvider("tiiuae/falcon-7b", args.cache_dir),
+        # Intentionally use a sequence length of 2048, even though the model can support 32k.
+        "Mistral-7B-v0.1 ": HuggingFaceModelProvider(
+            "mistralai/Mistral-7B-v0.1", args.cache_dir, sequence_length=2048
+        ),
     }
 
     ppls = defaultdict(list)
     model_sizes = []
-    # First compute for the standard models.
+    # For each model, compute PPL on each dataset.
     for model_name, provider in models.items():
         bt.logging.info(f"Computing benchmarks for model: {model_name}")
-        model = provider.get_model()
-        tokenizer = provider.get_tokenizer()
-        for dataset_name, dataset in datasets.items():
-            bt.logging.info(
-                f"Computing PPL for model: {model_name} on dataset: {dataset_name}"
-            )
-            ppls[dataset_name].append(compute_ppl(dataset, model, tokenizer))
+        get_model_start = time.time()
+        model = provider.get_model().to("cuda")
+        model.eval()
         model_size = sum(p.numel() for p in model.parameters())
         model_sizes.append(format_model_size(model_size))
+
+        # Should be cached and reasonably fast.
+        bt.logging.info(
+            f"Finished getting model: {model_name} of size {model_size} in {round(time.time()- get_model_start, 2)}"
+        )
+
+        tokenizer = provider.get_tokenizer()
+        for dataset_name, dataset in datasets.items():
+            compute_start = time.time()
+            bt.logging.info(
+                f"Starting computing PPL for model: {model_name} on dataset: {dataset_name}"
+            )
+            ppls[dataset_name].append(
+                compute_ppl(
+                    dataset,
+                    model,
+                    tokenizer,
+                    max_length=provider.get_sequence_length(),
+                )
+            )
+            bt.logging.info(
+                f"Finished computing PPL: {round(ppls[dataset_name][-1], 2)} for model: {model_name} on dataset: {dataset_name} in {round(time.time()- compute_start, 2)}"
+            )
         del model
         del tokenizer
+        torch.cuda.empty_cache()
 
     # Log to wandb.
     wandb.login(key=WANDB_TOKEN)
@@ -296,8 +344,9 @@ def run_benchmarks(args: ArgumentParser, datasets: Dict[str, str]):
         wandb.log({"benchmarks": table})
 
 
-def main(args: ArgumentParser):
+def main(args: ArgumentParser, config: bt.config):
 
+    bt.logging.info("Loading datasets...")
     datasets = {
         "Wikitext103 (PPL)": get_wikitext103(args.cache_dir),
         "Falcon Refined Web (PPL)": get_falcon(),
@@ -305,7 +354,7 @@ def main(args: ArgumentParser):
 
     while True:
         try:
-            run_benchmarks(args, datasets)
+            run_benchmarks(args, datasets, config)
 
             # Run every 12 hours.
             time.sleep(12 * 60 * 60)
@@ -322,6 +371,9 @@ if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--cache_dir", type=str, default=None)
 
+    bt.subtensor.add_args(parser)
+
+    config = bt.config(parser=parser)
     args = parser.parse_args()
 
-    main(args)
+    main(args, config)

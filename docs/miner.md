@@ -112,6 +112,7 @@ Some flags you may find useful:
 - `--load_uid`: when passing a uid you will download and train the model from the matching miner on the network.
 - `--load_model_dir`: the path to a local model directory [saved via Hugging Face API].
 - `--load_model`: the path to a safetensors file [not necessarily saved from Hugging Face API].
+- `--upload_b16`: if the model should be uploaded with bfloat16.
 
 ---
 
@@ -125,6 +126,8 @@ You can manually upload with the following command:
 ```shell
 python scripts/upload_model.py --load_model_dir <path to model> --hf_repo_id my-username/my-project --wallet.name coldkey --wallet.hotkey hotkey
 ```
+
+Note: By default this will upload using bfloat16 (unlike the miner). You can pass ``--no-upload-b16`` to instead upload with fp32.
 
 ## Running a custom Miner
 
@@ -150,7 +153,7 @@ model: PreTrainedModel = await pt.mining.load_remote_model(uid=123, download_dir
 pt.mining.save(model, "model-foo/")
 
 # Load the model from disk.
-pt.mining.load_local_model("model-foo/")
+pt.mining.load_local_model("model-foo/", use_bf16=True)
 
 # Publish the model for validator evaluation.
 wallet = bt.wallet()

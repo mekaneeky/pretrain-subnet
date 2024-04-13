@@ -19,6 +19,7 @@
 import os
 import sys
 import time
+import torch
 from typing import Optional
 import constants
 from model.data import Model, ModelId
@@ -147,13 +148,21 @@ def load_gpt2_model(model_file: str) -> PreTrainedModel:
     return model
 
 
-def load_local_model(model_dir: str) -> PreTrainedModel:
+def load_local_model(model_dir: str, use_bf16: bool = False) -> PreTrainedModel:
     """Loads a model from a directory."""
-    return AutoModelForCausalLM.from_pretrained(
-        pretrained_model_name_or_path=model_dir,
-        local_files_only=True,
-        use_safetensors=True,
-    )
+    if use_bf16:
+        return AutoModelForCausalLM.from_pretrained(
+            pretrained_model_name_or_path=model_dir,
+            local_files_only=True,
+            use_safetensors=True,
+            torch_dtype=torch.bfloat16,
+        )
+    else:
+        return AutoModelForCausalLM.from_pretrained(
+            pretrained_model_name_or_path=model_dir,
+            local_files_only=True,
+            use_safetensors=True,
+        )
 
 
 async def load_best_model(download_dir: str):

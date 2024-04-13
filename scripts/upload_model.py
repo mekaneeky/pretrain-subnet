@@ -9,7 +9,6 @@ Prerequisites:
    3. Your miner is registered
 """
 
-
 import asyncio
 import os
 import argparse
@@ -42,6 +41,11 @@ def get_config():
         help="If provided, loads a previously trained HF model from the specified directory",
     )
     parser.add_argument(
+        "--upload_b16",
+        action="store_false",  # Defaults to True.
+        help="If true, upload the model using bfloat16.",
+    )
+    parser.add_argument(
         "--netuid",
         type=str,
         default=constants.SUBNET_UID,
@@ -72,7 +76,7 @@ async def main(config: bt.config):
     HuggingFaceModelStore.assert_access_token_exists()
 
     # Load the model from disk and push it to the chain and Hugging Face.
-    model = pt.mining.load_local_model(config.load_model_dir)
+    model = pt.mining.load_local_model(config.load_model_dir, config.upload_b16)
     await pt.mining.push(model, config.hf_repo_id, wallet)
 
 
