@@ -1,7 +1,5 @@
 # The MIT License (MIT)
 # Copyright © 2023 Yuma Rao
-# TODO(developer): Set your name
-# Copyright © 2023 <your name>
 
 # Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
 # documentation files (the “Software”), to deal in the Software without restriction, including without limitation
@@ -55,7 +53,7 @@ with open(path.join(here, "README.md"), encoding="utf-8") as f:
 
 # loading version from setup.py
 with codecs.open(
-    os.path.join(here, "pretrain/__init__.py"), encoding="utf-8"
+    os.path.join(here, "constants/__init__.py"), encoding="utf-8"
 ) as init_file:
     version_match = re.search(
         r"^__version__ = ['\"]([^'\"]*)['\"]", init_file.read(), re.M
@@ -68,11 +66,11 @@ setup(
     description="pretrain bittensor subnet",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/unconst/pretrain-subnet", 
+    url="https://github.com/unconst/pretrain-subnet",
     author="bittensor.com",  # TODO(developer): Change this value to your module subnet author name.
     packages=find_packages(),
     include_package_data=True,
-    author_email="",  # TODO(developer): Change this value to your module subnet author email.
+    author_email="",
     license="MIT",
     python_requires=">=3.8",
     install_requires=requirements,

@@ -16,42 +16,13 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
-from transformers import (
-    GPTNeoXConfig,
-    GPTNeoXForCausalLM,
-    AutoTokenizer,
-    GPT2TokenizerFast,
-)
+import typing
+import constants
 import bittensor as bt
 
-config = GPTNeoXConfig()
 
-
-# 769_782_400 param model as a sample.
-def get_model():
-    config = GPTNeoXConfig(
-        vocab_size=10000,
-        num_attention_heads=40,
-        hidden_size=1600,
-        intermediate_size=6400,
-        num_hidden_layers=24,
-        max_position_embeddings=2048,
-    )
-    return GPTNeoXForCausalLM(config)
-
-
-def get_old_tokenizer(cache_dir: str = None):
-    """Returns the tokenizer used prior to 7B parameter models"""
-    tokenizer = AutoTokenizer.from_pretrained("distilgpt2", cache_dir=cache_dir)
-    tokenizer.pad_token = tokenizer.eos_token
-    return tokenizer
-
-
-def get_tokenizer(cache_dir: str = None):
-    """Returns the tokenizer used by the latest models."""
-    bt.logging.info(
-        "Getting gpt-4 tokenizer. Following logs about not matching GPT2TokenizerFast are expected."
-    )
-    tokenizer = GPT2TokenizerFast.from_pretrained("Xenova/gpt-4", cache_dir=cache_dir)
-    tokenizer.pad_token = tokenizer.eos_token
-    return tokenizer
+def best_uid(metagraph: typing.Optional[bt.metagraph] = None) -> int:
+    """Returns the best performing UID in the metagraph."""
+    if not metagraph:
+        metagraph = bt.subtensor().metagraph(constants.SUBNET_UID)
+    return max(range(metagraph.n), key=lambda uid: metagraph.I[uid].item())

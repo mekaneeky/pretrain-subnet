@@ -20,31 +20,33 @@ import typing
 import requests
 import bittensor as bt
 from torch.utils.data import IterableDataset
-from transformers import GPT2Tokenizer
 from transformers import AutoTokenizer
 import time
-import random
 
-model_name = 'distilgpt2'
 
 class SubsetFalconLoader(IterableDataset):
     max_pages: int = 968000015
 
-    def __init__(self, batch_size, sequence_length, pages: typing.List[int]):
+    def __init__(
+        self,
+        batch_size,
+        sequence_length,
+        pages: typing.List[int],
+        tokenizer: AutoTokenizer,
+    ):
         self.batch_size = batch_size
         self.sequence_length = sequence_length
         self.num_rows_per_page = 100
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer = tokenizer
         self.base_url = "https://datasets-server.huggingface.co/rows"
         self.params = {
             "dataset": "tiiuae/falcon-refinedweb",
             "config": "default",
-            "split": "train"
+            "split": "train",
         }
         self.pages = pages
         self.buffer = []
-        self.retry_limit = 5  # Number of retries
+        self.retry_limit = 10  # Number of retries
         self.retry_delay = 5  # Seconds to wait between retries
 
         for page in self.pages:
@@ -65,25 +67,28 @@ class SubsetFalconLoader(IterableDataset):
                 break  # If the request was successful, break out of the retry loop
             except requests.exceptions.RequestException as e:
                 attempt += 1
-                bt.logging.error(f"Failed to fetch data, attempt {attempt}/{self.retry_limit}. Reason: {str(e)}")
+                bt.logging.warning(
+                    f"Failed to fetch data, retrying. Attempt {attempt}/{self.retry_limit}"
+                )
                 if attempt < self.retry_limit:
                     time.sleep(self.retry_delay)  # Wait before the next retry
                 else:
-                    bt.logging.error("Maximum retry limit reached. Unable to fetch data.")
+                    bt.logging.error(
+                        "Maximum retry limit reached. Unable to fetch data."
+                    )
                     raise
-            
+
     def __iter__(self):
         while len(self.buffer) >= self.sequence_length * self.batch_size:
             batch = []
             for _ in range(self.batch_size):
-                batch.append(torch.tensor(self.buffer[:self.sequence_length]))
-                self.buffer = self.buffer[self.sequence_length:]
+                batch.append(torch.tensor(self.buffer[: self.sequence_length]))
+                self.buffer = self.buffer[self.sequence_length :]
             yield torch.stack(batch)
-            
+
     def __next__(self):
         batch = []
         for _ in range(self.batch_size):
-            batch.append(torch.tensor( self.buffer[:self.sequence_length] ))
-            self.buffer = self.buffer[self.sequence_length:]
+            batch.append(torch.tensor(self.buffer[: self.sequence_length]))
+            self.buffer = self.buffer[self.sequence_length :]
         return torch.stack(batch)
-            

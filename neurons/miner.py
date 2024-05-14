@@ -16,14 +16,30 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
+import asyncio
+import math
 import os
 import wandb
 import torch
-import string
 import random
 import argparse
-import pretrain
+import constants
+from model.storage.chain.chain_model_metadata_store import ChainModelMetadataStore
+from model.storage.hugging_face.hugging_face_model_store import HuggingFaceModelStore
+from model.storage.model_metadata_store import ModelMetadataStore
+from model.storage.remote_model_store import RemoteModelStore
+import pretrain as pt
 import bittensor as bt
+from transformers import PreTrainedModel
+from utilities import utils
+import datetime as dt
+
+from dotenv import load_dotenv
+
+load_dotenv()  # take environment variables from .env.
+
+os.environ["TOKENIZERS_PARALLELISM"] = "true"
+
 
 # === Config ===
 def get_config():
@@ -40,43 +56,97 @@ def get_config():
     # Initialize an argument parser
     parser = argparse.ArgumentParser()
 
-    # Add model_path argument which allows the user to specify the path of the model
-    parser.add_argument("--model_path", type=str, required=False, help="Override model path")
-
-    # Add device argument which defaults to 'cuda' if available, else 'cpu'
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device name.")
-
-    # Add device argument which defaults to 'cuda' if available, else 'cpu'
-    parser.add_argument("--load_best", action='store_true', help='If set, the miner loads the best model from wandb to train off.' ) 
-
-    # Add device argument which defaults to 'cuda' if available, else 'cpu'
-    parser.add_argument("--load_run_id", type=str, default=None, help='If passed loads the model under this run id' )  
-
-    # Add device argument which defaults to 'cuda' if available, else 'cpu'
-    parser.add_argument("--continue_id", type=str, default=None, help='If passed continues from the model on the passed run.' )  
-
-    # Set the number of epochs
-    parser.add_argument("--num_epochs", type = int, default = -1, help="Number of training epochs (-1 is infinite)")
-
-    # Training lr.
-<<<<<<< HEAD
-    parser.add_argument("--lr", type = float, default = 0.0000001, help="Learning rate.")
-=======
-    parser.add_argument("--lr", type = float, default = 0.000001, help="Learning rate.")
->>>>>>> 47057673e0ba971a8c0d47ab9cde716c94676fef
-
-    # Training batch size
-    parser.add_argument("--bs", type = int, default = pretrain.batch_size, help="Batch size")
-
-    # Training sequence length
-    parser.add_argument("--sl", type = int, default = pretrain.sequence_length, help="Sequence length")
-
-    # Set the number of pages trained per epoch
-<<<<<<< HEAD
-    parser.add_argument("--pages_per_epoch", type = int, default=10, help="Number of pages trained on per epoch")
-=======
-    parser.add_argument("--pages_per_epoch", type = int, default=5, help="Number of pages trained on per epoch")
->>>>>>> 47057673e0ba971a8c0d47ab9cde716c94676fef
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="Does not launch a wandb run, does not send model to wandb, does not check if registered",
+    )
+    parser.add_argument(
+        "--wandb_project", type=str, help="The wandb project to log to."
+    )
+    parser.add_argument("--wandb_entity", type=str, help="The wandb entity to log to.")
+    parser.add_argument(
+        "--hf_repo_id",
+        type=str,
+        help="The hugging face repo id, which should include the org or user and repo name. E.g. jdoe/pretraining",
+    )
+    parser.add_argument(
+        "--avg_loss_upload_threshold",
+        type=float,
+        default=0,  # Default to never uploading.
+        help="The threshold for avg_loss the model must achieve to upload it to hugging face. A miner can only advertise one model, so it should be the best one.",
+    )
+    parser.add_argument(
+        "--model_dir",
+        default=os.path.join(constants.ROOT_DIR, "local-models/"),
+        help="Where to download/save models for training",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        help="The device on which to run. cpu or cuda",
+    )
+    parser.add_argument(
+        "--load_best",
+        action="store_true",
+        help="If set, the miner loads the best model from wandb to train off.",
+    )
+    parser.add_argument(
+        "--load_uid",
+        type=int,
+        default=None,
+        help="If passed loads the model under the specified uid.",
+    )
+    parser.add_argument(
+        "--load_model_dir",
+        type=str,
+        default=None,
+        help="If provided, loads a previously trained HF model from the specified directory",
+    )
+    parser.add_argument(
+        "--upload_b16",
+        action="store_true",  # Currently defaults to false. Flip post 7b block.
+        help="If true, upload the model using bfloat16.",
+    )
+    parser.add_argument(
+        "--load_model",
+        type=str,
+        default=None,
+        help="If provided, loads the safetensor serialized model from the specified file."
+        "The model must be a GPT2LMHeadModel, with config as in pretrain/model.py",
+    )
+    parser.add_argument(
+        "--num_epochs",
+        type=int,
+        default=-1,
+        help="Number of training epochs (-1 is infinite)",
+    )
+    parser.add_argument("--lr", type=float, default=0.00001, help="Learning rate.")
+    parser.add_argument(
+        "--bs", type=int, default=constants.batch_size, help="Batch size"
+    )
+    parser.add_argument(
+        "--sl", type=int, default=constants.SEQUENCE_LENGTH_2, help="Sequence length"
+    )
+    parser.add_argument(
+        "--accumulation_steps",
+        type=int,
+        default=5,
+        help="The number of training accumulation steps.",
+    )
+    parser.add_argument(
+        "--pages_per_epoch",
+        type=int,
+        default=10,
+        help="Number of pages trained on per epoch",
+    )
+    parser.add_argument(
+        "--netuid",
+        type=str,
+        default=constants.SUBNET_UID,
+        help="The subnet UID.",
+    )
 
     # Include wallet and logging arguments from bittensor
     bt.wallet.add_args(parser)
@@ -86,217 +156,259 @@ def get_config():
     # Parse the arguments and create a configuration namespace
     config = bt.config(parser)
 
-    # Expand the user path and create a full path for the model
-    config.full_path = os.path.expanduser(
-        "{}/{}/{}/netuid{}/{}".format(
-            config.logging.logging_dir,
-            config.wallet.name,
-            config.wallet.hotkey,
-            pretrain.NETUID,
-            "miner",
-        )
-    )
-
-    # Set the default model path if it wasn't provided in the command line
-    if config.model_path == None:
-        config.model_path = config.full_path + '/' + 'model.pth'
-
-    # Create the directory for the model path if it does not exist
-    if not os.path.exists(os.path.dirname(config.model_path)):
-        os.makedirs(os.path.dirname(config.model_path), exist_ok=True)
-
     return config
 
-# Parse the configuration
-config = get_config()
 
-# Print the entire configuration setup
-print(config)
+async def load_starting_model(
+    config: bt.config,
+    metagraph: bt.metagraph,
+    metadata_store: ModelMetadataStore,
+    remote_model_store: RemoteModelStore,
+) -> PreTrainedModel:
+    """Loads the model to train based on the provided config."""
 
-# Create bittensor objects and check uid.
-bt.logging( config = config )
-wallet = bt.wallet( config = config ) 
-subtensor = bt.subtensor( config = config )
-metagraph = subtensor.metagraph( pretrain.NETUID )
-if wallet.hotkey.ss58_address not in metagraph.hotkeys: 
-    bt.logging.error("You are not registered. Use `btcli s recycle_register` to register.")
-    exit()
-my_uid = metagraph.hotkeys.index( wallet.hotkey.ss58_address )
-bt.logging.success( f'You are registered with address: {wallet.hotkey.ss58_address} and uid: {my_uid}' )
+    # Initialize the model based on the best on the network.
+    if config.load_best:
+        # Get the best UID be incentive and load it.
+        best_uid = pt.graph.best_uid(metagraph)
+        model = await pt.mining.load_remote_model(
+            best_uid,
+            config.model_dir,
+            metagraph,
+            metadata_store,
+            remote_model_store,
+        )
+        bt.logging.success(
+            f"Training with model from best uid: {best_uid}. Model={str(model)}"
+        )
+        return model
 
-# Initialize and configure the model for pretraining
-model = pretrain.model.get_model()  # Get the model from the pretrain module
-torch.save(model.state_dict(), config.model_path)
-api = wandb.Api( timeout = 100 )
+    # Initialize the model based on a passed uid.
+    if config.load_uid is not None:
+        # Sync the state from the passed uid.
+        model = await pt.mining.load_remote_model(
+            config.load_uid,
+            config.model_dir,
+            metagraph,
+            metadata_store,
+            remote_model_store,
+        )
+        bt.logging.success(
+            f"Training with model from uid: {config.load_uid}. Model={str(model)}"
+        )
+        return model
+
+    # Check if we should load a model from a local directory.
+    if config.load_model_dir:
+        model = pt.mining.load_local_model(config.load_model_dir)
+        bt.logging.success(f"Training with model from disk. Model={str(model)}")
+        return model
+
+    # Check if we should load a model from a local file.
+    if config.load_model:
+        model = pt.mining.load_gpt2_model(config.load_model)
+        bt.logging.success(f"Training with model from disk. Model={str(model)}")
+        return model
+
+    # Start from scratch.
+    model = pt.model.get_model()
+    bt.logging.success(f"Training from scratch. Model={str(model)}")
+
+    return model
 
 
-def get_run_from_id( run_id ):
-    run_path = f"opentensor-dev/openpretraining/{run_id}"
-    bt.logging.success(f'Loading model from path: {run_path}')
-    return api.run(run_path)
+async def main(config: bt.config):
+    # Create bittensor objects.
+    bt.logging(config=config)
 
-# Optionall load the model from the passed run id:
-def load_model_from_run( run ):
-    model_file = run.file("model.pth")
-    model_file.download(replace=True, root = os.path.dirname(config.model_path) )
-    bt.logging.success(f'Loaded and saved model to: {config.model_path}')
+    wallet = bt.wallet(config=config)
+    subtensor = bt.subtensor(config=config)
+    metagraph = subtensor.metagraph(config.netuid)
 
-# Model is pulled from specific run.
-if config.load_run_id != None:
-    bt.logging.success(f'Loading based on --config.load_run_id {config.model_path}')
-    load_model_from_run( get_run_from_id( config.load_run_id ) )
-    
-# Model is pulled from best on network
-elif config.load_best:
-    bt.logging.success(f'Loading based on --config.load_best')
-<<<<<<< HEAD
-    all_valid_runs = pretrain.get_miner_runs( metagraph )
-    sorted_valid_runs = sorted( list( all_valid_runs.values()), key=lambda x: x['incentive'])
-    load_model_from_run( get_run_from_id(sorted_valid_runs[0]['run']) )
-=======
-    best_uid = max(range(256), key=lambda uid: metagraph.I[uid].item())
-    print(f"best uid is {best_uid}")
-    runs = api.runs(
-        "opentensor-dev/openpretraining",
-        filters={
-            "config.version": pretrain.__version__,
-            "config.type": "miner",
-            "config.run_name": {
-                "$regex": f"miner-{best_uid}-.*"
-            }
-        }
+    # If running online, make sure the miner is registered, has a hugging face access token, and has provided a repo id.
+    my_uid = None
+    if not config.offline:
+        my_uid = utils.assert_registered(wallet, metagraph)
+        HuggingFaceModelStore.assert_access_token_exists()
+        utils.validate_hf_repo_id(config.hf_repo_id)
+
+    # Create a unique run id for this run.
+    run_id = dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    model_dir = pt.mining.model_path(config.model_dir, run_id)
+    os.makedirs(model_dir, exist_ok=True)
+
+    use_wandb = False
+    if not config.offline:
+        if config.wandb_project is None or config.wandb_entity is None:
+            bt.logging.warning(
+                "Wandb project or entity not specified. This run will not be logged to wandb"
+            )
+        else:
+            use_wandb = True
+
+    # Init model.
+    metadata_store = ChainModelMetadataStore(subtensor, wallet, config.netuid)
+    remote_store = HuggingFaceModelStore()
+    model: PreTrainedModel = await load_starting_model(
+        config, metagraph, metadata_store, remote_store
     )
-    load_model_from_run( get_run_from_id(runs[0].id) )
->>>>>>> 47057673e0ba971a8c0d47ab9cde716c94676fef
+    model = model.train()
+    model = model.to(config.device)
 
-elif config.continue_id:
-    run = get_run_from_id( config.continue_id  )
-    run_hotkey = run.config['hotkey']
-    load_model_from_run( run )
+    bt.logging.success(f"Saving model to path: {model_dir}.")
+    pt.mining.save(model, model_dir)
 
-# Model is reinited fresh.
-else:
-    bt.logging.success(f'Starting model from scratch')
+    # Build optimizer
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=0.01)
+    wandb_run = None
 
-# Load the model.
-model_weights = torch.load( config.model_path, map_location=torch.device(config.device) )
-model.load_state_dict( model_weights )
-model.zero_grad()  # Reset gradients to zero
-model.train()  # Set the model to training mode
-model.to(config.device)  # Move the model to the specified device
+    # If using wandb, start a new run.
+    if use_wandb:
+        token = os.getenv("WANDB_API_KEY")
+        if not token:
+            raise ValueError(
+                "To use Wandb, you must set WANDB_API_KEY in your .env file"
+            )
 
-# Initialize the optimizer
-optimizer = torch.optim.AdamW( model.parameters(), lr = config.lr, weight_decay=0.01)
+        wandb.login(key=token)
 
-import random
+        wandb_run = wandb.init(
+            name=run_id,
+            entity=config.wandb_entity,
+            project=config.wandb_project,
+            config={
+                "uid": my_uid,
+                "hotkey": wallet.hotkey.ss58_address,
+                "run_name": run_id,
+                "version": constants.__version__,
+                "type": "miner",
+            },
+            allow_val_change=True,
+        )
 
-# Initialize a variable to keep track of the best average loss
-best_avg_loss = float('inf')
+        # At the end of the run, upload the model to wandb, for debugging purposes only.
+        # This is not seen by validators.
+        wandb_run.save(os.path.join(model_dir, "*"), base_path=model_dir, policy="end")
+    else:
+        bt.logging.warning(
+            "Not posting run to wandb. Either --offline is specified or the wandb settings are missing."
+        )
 
-# Initialize your wandb run
-# NOTE: removing the "miner-" from this line will mean your miner is not picked up by validators.
-run_name = f'miner-{my_uid}-' + ''.join(random.choice( string.ascii_uppercase + string.digits ) for i in range(10))
-config.uid = my_uid
-config.hotkey = wallet.hotkey.ss58_address
-config.run_name = run_name
-config.version = pretrain.__version__
-config.type = 'miner'
-if config.continue_id:
-    # Attempts to continue run from previous id.
-    bt.logging.success(f'Continuing wandb run from id {config.continue_id}')
-    wandb_run = wandb.init(
-        id = config.continue_id,
-        name = run_name,
-        anonymous = "allow",
-        resume = "must",
-        project = 'openpretraining',
-        entity = 'opentensor-dev',
-        config = config,
-        dir = config.full_path,
-        allow_val_change=True,
-    )
-else:
-    bt.logging.success(f'Starting fresh wandb run')
-    wandb_run = wandb.init(
-        name = run_name,
-        anonymous = "allow",
-        reinit = False,
-        project = 'openpretraining',
-        entity = 'opentensor-dev',
-        config = config,
-        dir = config.full_path,
-    )
-bt.logging.success(f'\n\nSuccessfully started your wandb run {wandb_run.id}, you can continue it at a lated data by passing --continue_id {wandb_run.id}\n\n')
+    # Start the training loop
+    epoch_step = 0
+    global_step = 0
+    n_acc_steps = 0
+    best_avg_loss = math.inf
+    accumulation_steps = config.accumulation_steps
+    tokenizer = pt.model.get_tokenizer()
 
-# Signature
-signature = wallet.hotkey.sign( wandb_run.id.encode() ).hex()
-config.signature = signature
-wandb.config.update( config, allow_val_change=True )
-bt.logging.success(f'Successfully signed wandb run with signature {config.signature}')
+    try:
+        while epoch_step < config.num_epochs or config.num_epochs == -1:
+            # Initialize loss accumulator for the epoch
+            epoch_loss = 0.0
 
-# Save the model to wandb.
-wandb.save( config.model_path )
-bt.logging.success('Pushed artifact to the wandb run.')
+            # Prepare the data loader with random pages for each epoch
+            bt.logging.success(
+                f"Loading {config.pages_per_epoch} pages for training this epoch"
+            )
+            random_pages = [
+                random.randint(1, pt.dataset.SubsetFalconLoader.max_pages)
+                for _ in range(config.pages_per_epoch)
+            ]
+            loader = pt.dataset.SubsetFalconLoader(
+                batch_size=config.bs,
+                sequence_length=config.sl,
+                pages=random_pages,
+                tokenizer=tokenizer,
+            )
 
-# Start the training loop
-epoch_step = 0
-global_step = 0
-while epoch_step < config.num_epochs or config.num_epochs == -1:
-    # Initialize loss accumulator for the epoch
-    epoch_loss = 0.0
+            # Enumerate over the data loader
+            n_batches = 0
+            optimizer.zero_grad()  # Initialize gradients to zero
 
-    # Prepare the data loader with random pages for each epoch
-    bt.logging.success( f"Loading {config.pages_per_epoch} pages for training this epoch" )
-    random_pages = [random.randint(1, pretrain.dataset.SubsetFalconLoader.max_pages) for _ in range( config.pages_per_epoch )]
-    loader = pretrain.dataset.SubsetFalconLoader(
-        batch_size = config.bs, 
-        sequence_length = config.sl, 
-        pages = random_pages
-    )
+            for i, batch in enumerate(loader):
+                # Move the input batch to the device
+                inputs = batch.to(model.device)
 
-    # Enumerate over the data loader
-    n_batches = 0
-    for i, batch in enumerate(loader):
+                # Forward pass: compute the model output and loss
+                outputs = model(inputs, labels=inputs)
 
-        # Move the input batch to the device
-        inputs = batch.to(model.device)
-        
-        # Forward pass: compute the model output and loss
-        outputs = model(inputs, labels=inputs)
-               
-        # Backward pass: compute the gradient of the loss with respect to model parameters
-        outputs.loss.backward()
-        
-        # Clear the memory cache to avoid CUDA out of memory issues
-        torch.cuda.empty_cache()
-        
-        # Update model parameters
-        optimizer.step()
-        
-        # Step loss
-        wandb.log( { 'loss': outputs.loss.detach(), 'n_batches': n_batches }, step = global_step )
-        
-        # Log the loss for the current step
-        n_batches += 1
-        global_step += 1
-        epoch_loss += outputs.loss.detach().item()
-        bt.logging.success(f'Step: {i} loss: {outputs.loss.detach().item()}')
+                loss = outputs.loss / accumulation_steps  # Scale loss
+                loss.backward()  # Accumulate gradients
 
-    # Calculate the average loss for the epoch
-    avg_loss = epoch_loss / n_batches
+                if (i + 1) % accumulation_steps == 0:
+                    n_acc_steps += 1
+                    optimizer.step()  # Perform a single optimization step
+                    optimizer.zero_grad()  # Clear gradients
+                    bt.logging.success(
+                        f"Step: {n_acc_steps} loss: {outputs.loss.detach().item()}"
+                    )
+                    if use_wandb:
+                        wandb_run.log(
+                            {"loss": outputs.loss.detach(), "n_batches": n_batches},
+                            step=n_acc_steps,
+                        )
 
-    # Log the average loss for the epoch
-    bt.logging.success(f'Epoch: {epoch_step} average loss: {avg_loss}')
-    epoch_step += 1
+                torch.cuda.empty_cache()
 
-    # Check if the average loss of this epoch is the best we've seen so far
-    if avg_loss < best_avg_loss:
-        best_avg_loss = avg_loss  # Update the best average loss
-        bt.logging.success(f'New best average loss: {best_avg_loss}. Saving model...')
-        
-        # Save the model state to the specified path
-        torch.save( model.state_dict(), config.model_path )
+                n_batches += 1
+                global_step += 1
+                epoch_loss += outputs.loss.detach().item()
 
-        # Save the new best model to wandb.
-        wandb.save( config.model_path )
-        bt.logging.success('Pushed the new artifact to the wandb run.')
+            # Calculate the average loss for the epoch
+            avg_loss = epoch_loss / n_batches
+
+            # Log the average loss for the epoch
+            bt.logging.success(f"Epoch: {epoch_step} average loss: {avg_loss}")
+            epoch_step += 1
+
+            # Check if the average loss of this epoch is the best we've seen so far
+            if avg_loss < best_avg_loss:
+                best_avg_loss = avg_loss  # Update the best average loss
+
+                bt.logging.success(f"New best average loss: {best_avg_loss}.")
+
+                # Save the model to your mining dir.
+                bt.logging.success(f"Saving model to path: {model_dir}.")
+                pt.mining.save(model, model_dir)
+
+        bt.logging.success("Finished training")
+        # Push the model to your run.
+        if not config.offline:
+            if best_avg_loss < config.avg_loss_upload_threshold:
+                bt.logging.success(
+                    f"Trained model had a best_avg_loss of {best_avg_loss} which is below the threshold of {config.avg_loss_upload_threshold}. Uploading to hugging face. "
+                )
+
+                # First, reload the best model from the training run, using b16 if passed.
+                model_to_upload = pt.mining.load_local_model(
+                    model_dir, config.upload_b16
+                )
+                await pt.mining.push(
+                    model_to_upload,
+                    config.hf_repo_id,
+                    wallet,
+                    metadata_store=metadata_store,
+                    remote_model_store=remote_store,
+                )
+            else:
+                bt.logging.success(
+                    f"This training run achieved a best_avg_loss={best_avg_loss}, which did not meet the upload threshold. Not uploading to hugging face."
+                )
+        else:
+            bt.logging.success(
+                "Not uploading to hugging face because --offline was specified."
+            )
+
+    finally:
+        # Important step.
+        if wandb_run:
+            wandb_run.finish()
+
+
+if __name__ == "__main__":
+    # Parse and print configuration
+    config = get_config()
+    print(config)
+
+    asyncio.run(main(config))
